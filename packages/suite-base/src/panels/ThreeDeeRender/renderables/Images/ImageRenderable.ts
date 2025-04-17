@@ -56,6 +56,7 @@ export type ImageUserData = BaseUserData & {
 };
 
 export class ImageRenderable extends Renderable<ImageUserData> {
+  public readonly isImageMode: boolean;
   // Make sure that everything is build the first time we render
   // set when camera info or image changes
   #geometryNeedsUpdate = true;
@@ -72,14 +73,30 @@ export class ImageRenderable extends Renderable<ImageUserData> {
 
   #decodedImage?: ImageBitmap | ImageData;
   protected decoder?: WorkerImageDecoder;
+  public resizeWidth: number | undefined;
+  public onDecode?: () => void;
   #receivedImageSequenceNumber = 0;
   #displayedImageSequenceNumber = 0;
   #showingErrorImage = false;
 
   #disposed = false;
 
-  public constructor(topicName: string, renderer: IRenderer, userData: ImageUserData) {
+  public constructor(
+    topicName: string,
+    renderer: IRenderer,
+    userData: ImageUserData,
+    { isImageMode = false }: { isImageMode?: boolean },
+  ) {
     super(topicName, renderer, userData);
+    this.isImageMode = isImageMode;
+  }
+
+  public setResizeWidth(resizeWidth: number): void {
+    this.resizeWidth = resizeWidth;
+  }
+
+  public setOnImageDecode(onDecode: () => void): void {
+    this.onDecode = onDecode;
   }
 
   protected isDisposed(): boolean {
@@ -172,59 +189,19 @@ export class ImageRenderable extends Renderable<ImageUserData> {
     this.userData.settings = newSettings;
   }
 
-  public setImage(image: AnyImage, resizeWidth?: number, onDecoded?: () => void): void {
+  public setImage(image: AnyImage): void {
     this.userData.image = image;
 
     const seq = ++this.#receivedImageSequenceNumber;
-    const decodePromise = this.decodeImage(image, resizeWidth);
+    const decodePromise = this.decodeImage(image, this.resizeWidth);
 
     decodePromise
       .then((result) => {
-        if (this.isDisposed()) {
-          return;
-        }
-        // prevent displaying an image older than the one currently displayed
-        if (this.#displayedImageSequenceNumber > seq) {
-          return;
-        }
-        this.#displayedImageSequenceNumber = seq;
-        this.#decodedImage = result;
-        this.#textureNeedsUpdate = true;
-        this.update();
-        this.#showingErrorImage = false;
-
-        onDecoded?.();
-        this.removeError(DECODE_IMAGE_ERR_KEY);
-        this.renderer.queueAnimationFrame();
+        this.handleDecodedImage(result, seq);
       })
-      .catch((err) => {
-        log.error(err);
-        if (this.isDisposed()) {
-          return;
-        }
-        // avoid needing to recreate error image if it already shown
-        if (!this.#showingErrorImage) {
-          void this.#setErrorImage(seq, onDecoded);
-        }
-        this.addError(DECODE_IMAGE_ERR_KEY, `Error decoding image: ${err.message}`);
+      .catch((err: unknown) => {
+        this.handleDecodeError(err, seq);
       });
-  }
-
-  async #setErrorImage(seq: number, onDecoded?: () => void): Promise<void> {
-    const errorBitmap = await getErrorImage(64, 64);
-    if (this.isDisposed()) {
-      return;
-    }
-    if (this.#displayedImageSequenceNumber > seq) {
-      return;
-    }
-    this.#decodedImage = errorBitmap;
-    this.#textureNeedsUpdate = true;
-    this.update();
-    this.#showingErrorImage = true;
-    // call ondecoded to display the error image when calibration is None
-    onDecoded?.();
-    this.renderer.queueAnimationFrame();
   }
 
   protected async decodeImage(
@@ -235,6 +212,37 @@ export class ImageRenderable extends Renderable<ImageUserData> {
       return await decodeCompressedImageToBitmap(image, resizeWidth);
     }
     return await (this.decoder ??= new WorkerImageDecoder()).decode(image, this.userData.settings);
+  }
+
+  public handleDecodedImage(imageData: ImageBitmap | ImageData, seq: number): void {
+    if (this.isDisposed()) {
+      return;
+    }
+    // prevent displaying an image older than the one currently displayed
+    if (this.#displayedImageSequenceNumber > seq) {
+      return;
+    }
+    this.#displayedImageSequenceNumber = seq;
+    this.#decodedImage = imageData;
+    this.#textureNeedsUpdate = true;
+    this.update();
+    this.#showingErrorImage = false;
+
+    this.onDecode?.();
+    this.removeError(DECODE_IMAGE_ERR_KEY);
+    this.renderer.queueAnimationFrame();
+  }
+
+  public handleDecodeError(err: unknown, seq: number): void {
+    log.error(err);
+    if (this.isDisposed()) {
+      return;
+    }
+    // avoid needing to recreate error image if it already shown
+    if (!this.#showingErrorImage) {
+      void this.#setErrorImage(seq, this.onDecode);
+    }
+    this.addError(DECODE_IMAGE_ERR_KEY, `Error decoding image: ${(err as Error).message}`);
   }
 
   public update(): void {
@@ -272,6 +280,23 @@ export class ImageRenderable extends Renderable<ImageUserData> {
       this.#meshNeedsUpdate = false;
     }
     this.#isUpdating = false;
+  }
+
+  async #setErrorImage(seq: number, onDecoded?: () => void): Promise<void> {
+    const errorBitmap = await getErrorImage(64, 64);
+    if (this.isDisposed()) {
+      return;
+    }
+    if (this.#displayedImageSequenceNumber > seq) {
+      return;
+    }
+    this.#decodedImage = errorBitmap;
+    this.#textureNeedsUpdate = true;
+    this.update();
+    this.#showingErrorImage = true;
+    // call ondecoded to display the error image when calibration is None
+    onDecoded?.();
+    this.renderer.queueAnimationFrame();
   }
 
   #rebuildGeometry() {

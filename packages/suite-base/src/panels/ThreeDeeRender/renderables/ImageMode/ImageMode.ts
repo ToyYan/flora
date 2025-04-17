@@ -64,6 +64,7 @@ import { SettingsTreeEntry } from "../../SettingsManager";
 import {
   CAMERA_CALIBRATION_DATATYPES,
   COMPRESSED_IMAGE_DATATYPES,
+  COMPRESSED_VIDEO_DATATYPES,
   RAW_IMAGE_DATATYPES,
 } from "../../foxglove";
 import {
@@ -74,6 +75,7 @@ import {
 } from "../../ros";
 import { topicIsConvertibleToSchema } from "../../topicIsConvertibleToSchema";
 import { ICameraHandler } from "../ICameraHandler";
+import { ImageVideoRenderable } from "../Images/ImageVideoRenderable";
 import { getTopicMatchPrefix, sortPrefixMatchesToFront } from "../Images/topicPrefixMatching";
 import { colorModeSettingsFields } from "../colorMode";
 
@@ -108,6 +110,7 @@ export const ALL_SUPPORTED_IMAGE_SCHEMAS = new Set([
   ...ROS_COMPRESSED_IMAGE_DATATYPES,
   ...RAW_IMAGE_DATATYPES,
   ...COMPRESSED_IMAGE_DATATYPES,
+  ...COMPRESSED_VIDEO_DATATYPES,
 ]);
 
 const SUPPORTED_RAW_IMAGE_SCHEMAS = new Set([...RAW_IMAGE_DATATYPES, ...ROS_IMAGE_DATATYPES]);
@@ -289,6 +292,14 @@ export class ImageMode
           handler: this.messageHandler.handleCompressedImage,
           shouldSubscribe: this.imageShouldSubscribe,
           filterQueue: this.#filterMessageQueue.bind(this),
+        },
+      },
+      {
+        type: "schema",
+        schemaNames: COMPRESSED_VIDEO_DATATYPES,
+        subscription: {
+          handler: this.messageHandler.handleCompressedVideo,
+          shouldSubscribe: this.imageShouldSubscribe,
         },
       },
     ];
@@ -797,13 +808,21 @@ export class ImageMode
 
     this.add(renderable);
     this.imageRenderable = renderable;
-    renderable.setRenderBehindScene();
+    // renderable.setRenderBehindScene();
     renderable.visible = true;
     return renderable;
   }
 
-  protected initRenderable(topicName: string, userData: ImageUserData): ImageRenderable {
-    return new ImageRenderable(topicName, this.renderer, userData);
+  protected initRenderable(topicName: string, userData: ImageUserData): ImageVideoRenderable {
+    const topic = this.renderer.topics?.find((t) => t.name === topicName);
+    assert(topic != undefined, `Unable to find topic ${topicName} from message in topics list`);
+    const isVideoTopic =
+      COMPRESSED_VIDEO_DATATYPES.has(topic?.schemaName ?? "") ||
+      (topic?.convertibleTo?.some((t) => COMPRESSED_VIDEO_DATATYPES.has(t)) ?? false);
+    return new ImageVideoRenderable(topicName, this.renderer, userData, {
+      isVideoTopic,
+      isImageMode: true,
+    });
   }
 
   /** Gets frame from active info or image message if info does not have one*/
@@ -997,7 +1016,7 @@ export class ImageMode
             if (result) {
               resolve(result);
             } else {
-              reject(`Failed to create an image from ${width}x${height} canvas`);
+              reject(new Error(`Failed to create an image from ${width}x${height} canvas`));
             }
           }, "image/png");
         });
